@@ -48,6 +48,16 @@ impl Clause {
         }
     }
 
+    pub fn add_negative(&mut self, var: Var) {
+        if !self.negative.contains(&var) {
+            if !self.positive.contains(&var) {
+                self.negative.push(var);
+            } else {
+                panic!("Added var both positive and negative!");
+            }
+        }
+    }
+
     pub fn get(&self, var: Var) -> LiteralInfo {
         if self.positive.contains(&var) {
             LiteralInfo::POSITIVE
@@ -75,7 +85,7 @@ impl Debug for Clause {
         let str = all_vars
             .iter()
             .map(|&var| match self.get(var) {
-                LiteralInfo::POSITIVE => format!("{:+02}", var),
+                LiteralInfo::POSITIVE => format!("{:+03}", var),
                 LiteralInfo::NEGATIVE => format!("-{:02}", var),
                 LiteralInfo::NoOcc => unreachable!(),
             })
