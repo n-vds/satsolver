@@ -9,15 +9,21 @@ struct DecisionLevel {
     flipped: bool,
 }
 
-pub fn is_satisfiable(cnf: &Cnf) -> bool {
+pub struct Stats {
+    pub tries: usize,
+}
+
+pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
     const FIRST_TRY: bool = false;
+
+    let mut stats = Stats { tries: 0 };
 
     // fast checks
     if cnf.clauses.is_empty() {
-        return true;
+        return (true, stats);
     }
     if cnf.clauses.iter().any(|cls| cls.is_empty()) {
-        return false;
+        return (false, stats);
     }
 
     // solve
@@ -29,8 +35,9 @@ pub fn is_satisfiable(cnf: &Cnf) -> bool {
         // Check for satisfiability
         if let Some(dl) = dec_levels.last() {
             println!("...Checking {:?}", dl.assignment);
+            stats.tries += 1;
             if cnf.is_satisfied(&dl.assignment) {
-                return true;
+                return (true, stats);
             }
         }
 
@@ -45,7 +52,7 @@ pub fn is_satisfiable(cnf: &Cnf) -> bool {
             // Assignment complete, therefore backtrack
             let bt_result = backtrack(&mut dec_levels);
             match bt_result {
-                BacktrackResult::UnsatisfiableFormula => return false,
+                BacktrackResult::UnsatisfiableFormula => return (false, stats),
                 BacktrackResult::ContinueLevel => continue,
             }
         }
@@ -99,38 +106,28 @@ enum BacktrackResult {
 
 #[cfg(test)]
 mod tests {
-    use crate::{cnf::Clause, input::parse_cnf_from_str};
+    use crate::input::parse_cnf_from_str;
 
     use super::*;
 
     #[test]
     fn test_sat_sanity() {
-        assert!(is_satisfiable(&Cnf::new()));
-        assert!(!is_satisfiable(&parse_cnf_from_str("false").unwrap()));
-        assert!(!is_satisfiable(&parse_cnf_from_str("1\nfalse").unwrap()));
-        assert!(!is_satisfiable(&parse_cnf_from_str("-1\nfalse").unwrap()));
-        assert!(!is_satisfiable(&parse_cnf_from_str("false\n1").unwrap()));
-        assert!(!is_satisfiable(&parse_cnf_from_str("false\n-1").unwrap()));
-        assert!(is_satisfiable(&parse_cnf_from_str("1").unwrap()));
+        assert!(is_satisfiable(&Cnf::new()).0);
+        assert!(!is_satisfiable(&parse_cnf_from_str("false").unwrap()).0);
+        assert!(!is_satisfiable(&parse_cnf_from_str("1\nfalse").unwrap()).0);
+        assert!(!is_satisfiable(&parse_cnf_from_str("-1\nfalse").unwrap()).0);
+        assert!(!is_satisfiable(&parse_cnf_from_str("false\n1").unwrap()).0);
+        assert!(!is_satisfiable(&parse_cnf_from_str("false\n-1").unwrap()).0);
+        assert!(is_satisfiable(&parse_cnf_from_str("1").unwrap()).0);
     }
 
     #[test]
     fn test_sat_deep_dl() {
-        assert!(is_satisfiable(
-            &parse_cnf_from_str("1 2 3\n4 5 6\n7 8 9").unwrap()
-        ));
-        assert!(is_satisfiable(
-            &parse_cnf_from_str("-1 -2 -3\n-4 -5 -6\n-7 -8 -9").unwrap()
-        ));
-        assert!(is_satisfiable(
-            &parse_cnf_from_str("-1 -2 -3 4\n1\n2\n3").unwrap()
-        ));
-        assert!(!is_satisfiable(
-            &parse_cnf_from_str("1 2 3\n-1\n-2\n-3").unwrap()
-        ));
-        assert!(!is_satisfiable(
-            &parse_cnf_from_str("-1 2 -3\n1\n-2\n3").unwrap()
-        ));
+        assert!(is_satisfiable(&parse_cnf_from_str("1 2 3\n4 5 6\n7 8 9").unwrap()).0);
+        assert!(is_satisfiable(&parse_cnf_from_str("-1 -2 -3\n-4 -5 -6\n-7 -8 -9").unwrap()).0);
+        assert!(is_satisfiable(&parse_cnf_from_str("-1 -2 -3 4\n1\n2\n3").unwrap()).0);
+        assert!(!is_satisfiable(&parse_cnf_from_str("1 2 3\n-1\n-2\n-3").unwrap()).0);
+        assert!(!is_satisfiable(&parse_cnf_from_str("-1 2 -3\n1\n-2\n3").unwrap()).0);
     }
 
     #[test]
