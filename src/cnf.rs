@@ -1,8 +1,39 @@
 use std::fmt::Debug;
 
+use crate::assignment::Assignment;
+
 pub type Var = u32;
+
+#[derive(PartialEq)]
 pub struct Cnf {
     pub clauses: Vec<Clause>,
+}
+
+impl Cnf {
+    pub fn new() -> Self {
+        Cnf {
+            clauses: Vec::new(),
+        }
+    }
+
+    pub fn new_with(clauses: Vec<Clause>) -> Self {
+        Cnf { clauses }
+    }
+
+    pub fn var_range(&self) -> Var {
+        fn var_range_clause(slc: &[Var]) -> Var {
+            slc.iter().fold(0, |cur, var| cur.max(*var))
+        }
+
+        self.clauses.iter().fold(0, |cur, clause| {
+            cur.max(var_range_clause(&clause.positive))
+                .max(var_range_clause(&clause.negative))
+        })
+    }
+
+    pub fn is_satisfied(&self, assignment: &Assignment) -> bool {
+        self.clauses.iter().all(|cls| cls.is_satisfied(assignment))
+    }
 }
 
 impl Debug for Cnf {
@@ -12,7 +43,6 @@ impl Debug for Cnf {
             return Ok(());
         }
 
-        
         let result = self
             .clauses
             .iter()
@@ -66,6 +96,35 @@ impl Clause {
         } else {
             LiteralInfo::NoOcc
         }
+    }
+
+    pub fn is_satisfied(&self, assignment: &Assignment) -> bool {
+        self.positive
+            .iter()
+            .any(|&var| matches!(assignment.get(var), Some(true)))
+            || self
+                .negative
+                .iter()
+                .any(|&var| matches!(assignment.get(var), Some(false)))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.positive.is_empty() && self.negative.is_empty()
+    }
+}
+
+impl PartialEq for Clause {
+    fn eq(&self, other: &Self) -> bool {
+        fn check(literals: &Vec<u32>, other_literals: &Vec<u32>) -> bool {
+            literals
+                .iter()
+                .all(|literal| other_literals.contains(literal))
+        }
+
+        check(&self.positive, &other.positive)
+            && check(&other.positive, &self.positive)
+            && check(&self.negative, &other.negative)
+            && check(&other.negative, &self.negative)
     }
 }
 
