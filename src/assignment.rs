@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use crate::cnf::Var;
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Default)]
 pub struct Assignment(HashMap<Var, bool>);
 
 impl Assignment {
@@ -28,6 +28,12 @@ impl Assignment {
         let mut new = self.clone();
         new.change(var, val);
         new
+    }
+
+    pub fn with_all(&self, map: impl Iterator<Item = (Var, bool)>) -> Assignment {
+        let mut this = self.clone();
+        this.0.extend(map);
+        this
     }
 
     pub fn last_assigned(&self) -> Option<Var> {

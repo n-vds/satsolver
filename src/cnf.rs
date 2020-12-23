@@ -68,6 +68,21 @@ impl Clause {
         }
     }
 
+    pub fn positives(&self) -> impl Iterator<Item = Var> + '_ {
+        self.positive.iter().copied()
+    }
+
+    pub fn negatives(&self) -> impl Iterator<Item = Var> + '_ {
+        self.negative.iter().copied()
+    }
+
+    pub fn literals(&self) -> impl Iterator<Item = (Var, bool)> + '_ {
+        self.positive
+            .iter()
+            .map(|&it| (it, true))
+            .chain(self.negative.iter().map(|&it| (it, false)))
+    }
+
     pub fn add_positive(&mut self, var: Var) {
         if !self.positive.contains(&var) {
             if !self.negative.contains(&var) {

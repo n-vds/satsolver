@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use crate::{
     assignment::Assignment,
-    cnf::{Cnf, Var},
+    cnf::{Clause, Cnf, Var},
 };
 #[derive(Debug, PartialEq)]
 struct DecisionLevel {
@@ -29,6 +31,7 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
     // solve
     let max = cnf.var_range();
 
+    let initial_assignment = calc_bool_prop(&cnf, &Assignment::new()).unwrap_or_default();
     let mut dec_levels: Vec<DecisionLevel> = Vec::new();
 
     loop {
@@ -61,8 +64,10 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
         let new_assignment = dec_levels
             .last()
             .map(|dl| dl.assignment.with(var, FIRST_TRY))
-            .unwrap_or_else(|| Assignment::new_with(var, FIRST_TRY));
+            .unwrap_or_else(|| initial_assignment.with(var, FIRST_TRY));
 
+        // Propagate vars
+        let new_assignment = calc_bool_prop(&cnf, &new_assignment).unwrap_or(new_assignment);
         let new_dl = DecisionLevel {
             assignment: new_assignment,
             changed_var: var,
@@ -70,6 +75,57 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
         };
         dec_levels.push(new_dl);
     }
+}
+
+/// Calculates the boolean propagation
+///
+/// Returns a new assignment based on the given one,
+/// which contains all assignments known by boolean propagation
+/// or None if no variable could be propagated
+fn calc_bool_prop(cnf: &Cnf, a: &Assignment) -> Option<Assignment> {
+    let mut new_a = None;
+    let mut new_assignments = HashMap::new();
+
+    loop {
+        for clause in &cnf.clauses {
+            if let Some((var, val)) = calc_bool_prop_cls(
+                clause, //
+                new_a.as_ref().unwrap_or(a),
+            ) {
+                new_assignments.insert(var, val);
+            }
+        }
+
+        if !new_assignments.is_empty() {
+            let result = new_a
+                .as_ref()
+                .unwrap_or(a)
+                .with_all(new_assignments.iter().map(|(&var, &val)| (var, val)));
+            new_assignments.clear();
+            new_a = Some(result);
+        } else {
+            return new_a;
+        }
+    }
+}
+
+fn calc_bool_prop_cls(cls: &Clause, a: &Assignment) -> Option<(Var, bool)> {
+    // Check if only one literal is unset
+    let mut unassigned = None;
+
+    for (var, val) in cls.literals() {
+        if a.get(var).is_none() {
+            match unassigned {
+                None => unassigned = Some((var, val)),
+                Some(_) => {
+                    // more than one unassigned variable, nothing to propagate
+                    return None;
+                }
+            }
+        }
+    }
+
+    unassigned
 }
 
 /// Backtracks the given decision levels,
@@ -131,6 +187,65 @@ mod tests {
     }
 
     #[test]
+    fn test_prop_cls() {
+        let clauses = parse_cnf_from_str("1\n-2\n1 -2 3").unwrap().clauses;
+        assert_eq!(
+            calc_bool_prop_cls(&clauses[0], &Assignment::new()),
+            Some((1, true))
+        );
+        assert_eq!(
+            calc_bool_prop_cls(&clauses[1], &Assignment::new()),
+            Some((2, false))
+        );
+        assert_eq!(calc_bool_prop_cls(&clauses[2], &Assignment::new()), None);
+        assert_eq!(
+            calc_bool_prop_cls(
+                &clauses[2],
+                &Assignment::new().with(1, false).with(3, false)
+            ),
+            Some((2, false))
+        );
+        assert_eq!(
+            calc_bool_prop_cls(
+                &clauses[2], //
+                &Assignment::new().with(1, false).with(2, true)
+            ),
+            Some((3, true))
+        );
+    }
+
+    #[test]
+    fn test_prop() {
+        assert_eq!(
+            calc_bool_prop(&parse_cnf_from_str("1 2 3").unwrap(), &Assignment::new()),
+            None
+        );
+        assert_eq!(
+            calc_bool_prop(&parse_cnf_from_str("1\n-2\n3").unwrap(), &Assignment::new()),
+            Some(
+                Assignment::new() //
+                    .with(1, true)
+                    .with(2, false)
+                    .with(3, true)
+            )
+        );
+        assert_eq!(
+            calc_bool_prop(
+                &parse_cnf_from_str("1 2 3\n-2 4\n-3\n-4 -1 -5").unwrap(),
+                &Assignment::new().with(1, false)
+            ),
+            Some(
+                Assignment::new() //
+                    .with(1, false)
+                    .with(2, true)
+                    .with(3, false)
+                    .with(4, true)
+                    .with(5, false)
+            )
+        );
+    }
+
+    #[test]
     fn test_backtrack_empty() {
         let mut dls = vec![];
         assert!(matches!(
@@ -189,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn test_one_not_flipped() {
+    fn test_backtrack_one_not_flipped() {
         let mut dls = vec![DecisionLevel {
             assignment: Assignment::new_with(100, true),
             changed_var: 100,
@@ -211,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_not_flipped() {
+    fn test_backtrack_multiple_not_flipped() {
         let mut dls = vec![
             DecisionLevel {
                 assignment: Assignment::new_with(100, true),
