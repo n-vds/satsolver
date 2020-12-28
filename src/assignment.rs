@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use crate::cnf::Var;
+use crate::cnf::{LiteralTpl, Var};
 #[derive(Clone, PartialEq, Default)]
 pub struct Assignment(HashMap<Var, bool>);
 
@@ -30,7 +30,7 @@ impl Assignment {
         new
     }
 
-    pub fn with_all(&self, map: impl Iterator<Item = (Var, bool)>) -> Assignment {
+    pub fn with_all(&self, map: impl Iterator<Item = LiteralTpl>) -> Assignment {
         let mut this = self.clone();
         this.0.extend(map);
         this

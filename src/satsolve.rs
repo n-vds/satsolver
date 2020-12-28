@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::{
     assignment::Assignment,
     cnf::{Clause, Cnf, Var},
+    watchedliterals::WatchedLiterals,
 };
 #[derive(Debug, PartialEq)]
 struct DecisionLevel {
@@ -30,8 +31,15 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
 
     // solve
     let max = cnf.highest_var();
+    //    let initial_assignment = calc_bool_prop(&cnf, &Assignment::new()).unwrap_or_default();
 
-    let initial_assignment = calc_bool_prop(&cnf, &Assignment::new()).unwrap_or_default();
+    let mut watchedliterals = WatchedLiterals::new(&cnf);
+    println!("Watching literals: {:?}", watchedliterals);
+    let initial_assignment = match calc_initial_assignment(&watchedliterals) {
+        Some(a) => a,
+        None => return (false, stats), // unsatisfiable
+    };
+
     println!("---Initial: {:?}", initial_assignment);
     stats.tries += 1;
     if cnf.is_satisfied(&initial_assignment) {
@@ -43,9 +51,7 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
     loop {
         // Check for satisfiability
         if let Some(dl) = dec_levels.last() {
-            println!("...Checking {:?}", dl.assignment);
-            stats.tries += 1;
-            if cnf.is_satisfied(&dl.assignment) {
+            if check_assignment(&cnf, &dl.assignment, &mut stats) {
                 return (true, stats);
             }
         }
@@ -101,6 +107,39 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
         };
         dec_levels.push(new_dl);
     }
+}
+
+#[inline(always)]
+fn check_assignment(cnf: &Cnf, a: &Assignment, stats: &mut Stats) -> bool {
+    println!("...Checking {:?}", a);
+    stats.tries += 1;
+    return cnf.is_satisfied(&a);
+}
+
+/// Calculates the initial assignment from the watched literal's unit clauses
+///
+/// @return None, if the formula is unsatisfiable
+fn calc_initial_assignment(watchedliterals: &WatchedLiterals) -> Option<Assignment> {
+    let mut assignment = Assignment::new();
+
+    for (_cls, lit) in watchedliterals.unit_clauses() {
+        match assignment.get(lit.0) {
+            Some(val) => {
+                if val == lit.1 {
+                    // Assignment already done
+                    continue;
+                } else {
+                    // Wrong assignment and this is decision level zero
+                    return None;
+                }
+            }
+            None => {
+                assignment.change(lit.0, lit.1);
+            }
+        }
+    }
+
+    Some(assignment)
 }
 
 /// Calculates the boolean propagation
@@ -200,7 +239,7 @@ fn backtrack(dec_levels: &mut Vec<DecisionLevel>) -> BacktrackResult {
         }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum BacktrackResult {
     UnsatisfiableFormula,
     ContinueLevel,

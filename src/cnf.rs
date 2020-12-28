@@ -4,6 +4,8 @@ use crate::assignment::Assignment;
 
 pub type Var = u32;
 
+pub type LiteralTpl = (Var, bool);
+
 #[derive(PartialEq)]
 pub struct Cnf {
     pub clauses: Vec<Clause>,
@@ -76,7 +78,7 @@ impl Clause {
         self.negative.iter().copied()
     }
 
-    pub fn literals(&self) -> impl Iterator<Item = (Var, bool)> + '_ {
+    pub fn literals(&self) -> impl Iterator<Item = LiteralTpl> + '_ {
         self.positive
             .iter()
             .map(|&it| (it, true))
