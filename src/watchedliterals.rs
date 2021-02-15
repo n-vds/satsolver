@@ -67,6 +67,33 @@ impl WatchedLiterals {
             })
     }
 
+    pub fn update(&mut self, new_assignment: LiteralTpl) {
+        let (var, val) = new_assignment;
+
+        // Check if the opposite literal is conflicting with some clause
+        match self.access_map.get(&(var, !val)) {
+            Some(vec) => {
+                for &idx in vec.iter() {
+                    let wle = &self.watched[idx];
+                    match wle {
+                        WatchedLiteralEntry::TrueLiteral((var, val)) => {
+                            assert!(*var == new_assignment.0 && !val == new_assignment.1);
+
+                            // Since this is 
+                        }
+                        WatchedLiteralEntry::BothUnassigned(_, _) => {}
+                        WatchedLiteralEntry::UnitClause(_) => {}
+                        WatchedLiteralEntry::ClauseUnsatisfiable => {}
+                    }
+                }
+            }
+            None => {
+                // There is no conflict as there is no clause with the opposite literal
+                return;
+            }
+        }
+    }
+
     /// Tries to find two literals of the given clause, suitable to being watched literals
     fn find_watchedliterals(cls: &Clause, a: &Assignment) -> WatchedLiteralEntry {
         let literal_count = cls.literals().count();
