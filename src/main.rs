@@ -3,8 +3,6 @@ mod cnf;
 mod input;
 mod satsolve;
 
-use cnf::{Clause, Cnf};
-
 fn main() {
     println!(" S A T ");
     let phi = input::read_cnf_interactive();
@@ -19,7 +17,7 @@ fn main() {
         "not satisfiable"
     };
     println!("phi = {:?}", phi);
-    let combinations = 2f64.powi(phi.var_range() as i32);
+    let combinations = 2f64.powi(phi.highest_var() as i32);
     println!(
         "phi is {}, took {} evaluations ({:02.1}% of all combinations)",
         sat_str,

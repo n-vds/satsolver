@@ -29,7 +29,7 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
     }
 
     // solve
-    let max = cnf.var_range();
+    let max = cnf.highest_var();
 
     let initial_assignment = calc_bool_prop(&cnf, &Assignment::new()).unwrap_or_default();
     println!("---Initial: {:?}", initial_assignment);
@@ -48,7 +48,7 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
         // pick a new variable to set
         let var = 1 + dec_levels
             .last()
-            .and_then(|dl| dl.assignment.last_assigned())
+            .and_then(|dl| dl.assignment.highest_assigned_var())
             .unwrap_or(0);
 
         // Check if the assignment is complete, i.e. no variable to be set could be found
@@ -64,8 +64,9 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
         // Assignment incomplete, we found a new variable to set
         let new_assignment = dec_levels
             .last()
-            .map(|dl| dl.assignment.with(var, FIRST_TRY))
-            .unwrap_or_else(|| initial_assignment.with(var, FIRST_TRY));
+            .map(|dl| &dl.assignment)
+            .unwrap_or(&initial_assignment)
+            .with(var, FIRST_TRY);
 
         // Propagate vars
         let new_assignment = calc_bool_prop(&cnf, &new_assignment).unwrap_or(new_assignment);

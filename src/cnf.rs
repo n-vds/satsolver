@@ -20,14 +20,14 @@ impl Cnf {
         Cnf { clauses }
     }
 
-    pub fn var_range(&self) -> Var {
-        fn var_range_clause(slc: &[Var]) -> Var {
+    pub fn highest_var(&self) -> Var {
+        fn highest_var_in_clause(slc: &[Var]) -> Var {
             slc.iter().fold(0, |cur, var| cur.max(*var))
         }
 
         self.clauses.iter().fold(0, |cur, clause| {
-            cur.max(var_range_clause(&clause.positive))
-                .max(var_range_clause(&clause.negative))
+            cur.max(highest_var_in_clause(&clause.positive))
+                .max(highest_var_in_clause(&clause.negative))
         })
     }
 

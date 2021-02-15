@@ -36,7 +36,7 @@ impl Assignment {
         this
     }
 
-    pub fn last_assigned(&self) -> Option<Var> {
+    pub fn highest_assigned_var(&self) -> Option<Var> {
         self.0.keys().copied().max()
     }
 }
