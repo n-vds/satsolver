@@ -32,6 +32,7 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
     let max = cnf.var_range();
 
     let initial_assignment = calc_bool_prop(&cnf, &Assignment::new()).unwrap_or_default();
+    println!("---Initial: {:?}", initial_assignment);
     let mut dec_levels: Vec<DecisionLevel> = Vec::new();
 
     loop {
@@ -110,16 +111,36 @@ fn calc_bool_prop(cnf: &Cnf, a: &Assignment) -> Option<Assignment> {
 }
 
 fn calc_bool_prop_cls(cls: &Clause, a: &Assignment) -> Option<(Var, bool)> {
-    // Check if only one literal is unset
+    // Check if clause is not satisfied and only one literal is unset
     let mut unassigned = None;
 
     for (var, val) in cls.literals() {
-        if a.get(var).is_none() {
-            match unassigned {
-                None => unassigned = Some((var, val)),
-                Some(_) => {
-                    // more than one unassigned variable, nothing to propagate
+        match a.get(var) {
+            Some(assignment) => {
+                // This literal is assigned a value by a
+                if val == assignment {
+                    // This literal is satisfied, so is this whole clause
+                    // There is not anything to be propagated from a satisfied clause
                     return None;
+                } else {
+                    // This literal is false, so it cannot be propagated
+                    // This branch is intentionally left empty
+                }
+            }
+            None => {
+                // There is a literal that is not yet assigned a value
+                // Check how many of those there are
+                match unassigned {
+                    None => {
+                        // This is the only unassigned variable so far
+                        unassigned = Some((var, val));
+                    }
+                    Some(_) => {
+                        // There is already another literal that is unassigned,
+                        // so this is the second one. Either one of them
+                        // might be true, so there is nothing to propagate
+                        return None;
+                    }
                 }
             }
         }
@@ -187,6 +208,13 @@ mod tests {
     }
 
     #[test]
+    fn test_sat() {
+        assert!(is_satisfiable(&parse_cnf_from_str("1 2 3\n-2 -3\n-3\n-1").unwrap()).0);
+        assert!(is_satisfiable(&parse_cnf_from_str("1 2 3 4\n-2 -3\n-3\n-1").unwrap()).0);
+        assert!(is_satisfiable(&parse_cnf_from_str("1 2 3\n-2 -3\n-3 2\n-1").unwrap()).0);
+    }
+
+    #[test]
     fn test_prop_cls() {
         let clauses = parse_cnf_from_str("1\n-2\n1 -2 3").unwrap().clauses;
         assert_eq!(
@@ -215,6 +243,25 @@ mod tests {
     }
 
     #[test]
+    fn test_prop_cls_no_prop() {
+        let clauses = parse_cnf_from_str("1 2\n-2 -1\n1 -2 3").unwrap().clauses;
+        assert_eq!(calc_bool_prop_cls(&clauses[0], &Assignment::new()), None);
+        assert_eq!(calc_bool_prop_cls(&clauses[1], &Assignment::new()), None);
+        assert_eq!(calc_bool_prop_cls(&clauses[2], &Assignment::new()), None);
+        assert_eq!(
+            calc_bool_prop_cls(&clauses[2], &Assignment::new().with(1, false).with(3, true)),
+            None
+        );
+        assert_eq!(
+            calc_bool_prop_cls(
+                &clauses[2], //
+                &Assignment::new().with(1, false).with(2, false)
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn test_prop() {
         assert_eq!(
             calc_bool_prop(&parse_cnf_from_str("1 2 3").unwrap(), &Assignment::new()),
@@ -231,7 +278,7 @@ mod tests {
         );
         assert_eq!(
             calc_bool_prop(
-                &parse_cnf_from_str("1 2 3\n-2 4\n-3\n-4 -1 -5").unwrap(),
+                &parse_cnf_from_str("1 2 3\n-2 4\n-3\n-4 1 -5").unwrap(),
                 &Assignment::new().with(1, false)
             ),
             Some(
@@ -241,6 +288,19 @@ mod tests {
                     .with(3, false)
                     .with(4, true)
                     .with(5, false)
+            )
+        );
+        assert_eq!(
+            calc_bool_prop(
+                &parse_cnf_from_str("1 2 3\n-2 4\n-3\n-4 -1 -5").unwrap(),
+                &Assignment::new().with(1, false)
+            ),
+            Some(
+                Assignment::new() //
+                    .with(1, false)
+                    .with(2, true)
+                    .with(3, false)
+                    .with(4, true)
             )
         );
     }
