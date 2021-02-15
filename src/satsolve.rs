@@ -33,6 +33,11 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
 
     let initial_assignment = calc_bool_prop(&cnf, &Assignment::new()).unwrap_or_default();
     println!("---Initial: {:?}", initial_assignment);
+    stats.tries += 1;
+    if cnf.is_satisfied(&initial_assignment) {
+        return (true, stats);
+    }
+
     let mut dec_levels: Vec<DecisionLevel> = Vec::new();
 
     loop {
@@ -46,10 +51,29 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
         }
 
         // pick a new variable to set
-        let var = 1 + dec_levels
-            .last()
-            .and_then(|dl| dl.assignment.highest_assigned_var())
-            .unwrap_or(0);
+        // start with 1 + highest from last dl or 0
+        let var = {
+            let mut var = 1 + dec_levels
+                .last()
+                .and_then(|dl| dl.assignment.highest_assigned_var())
+                .unwrap_or(0);
+
+            // increase picked var while it is already set (due to bcp)
+            loop {
+                let assigned = dec_levels
+                    .last()
+                    .map(|dl| &dl.assignment)
+                    .unwrap_or(&initial_assignment)
+                    .get(var)
+                    .is_some();
+
+                if assigned {
+                    var += 1;
+                } else {
+                    break var;
+                }
+            }
+        };
 
         // Check if the assignment is complete, i.e. no variable to be set could be found
         if var > max {
