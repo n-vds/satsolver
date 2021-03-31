@@ -9,118 +9,341 @@ use std::fmt::Debug;
 
 pub struct WatchedLiterals {
     /// contains all watched literals indexed by the clause index
-    watched: Vec<WatchedLiteralEntry>,
+    watched_literals: Vec<Option<(LiteralTpl, LiteralTpl)>>,
 
-    /// maps from a literal to all the watched literal entries containing this literal
-    access_map: HashMap<LiteralTpl, Vec<usize>>,
+    /// maps from a literal to all clause indices that watch this literal
+    access_map: HashMap<LiteralTpl, Vec<usize>>, // TODO: more efficient data structure than vec
+}
+
+#[derive(Debug)]
+pub enum UpdateResult {
+    Unsatisfiable,
+    Satisfiable { propagations: Vec<LiteralTpl> },
+}
+
+#[cfg(test)]
+impl PartialEq for UpdateResult {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            Self::Unsatisfiable => matches!(other, Self::Unsatisfiable),
+            Self::Satisfiable { propagations: prp } => match other {
+                Self::Satisfiable {
+                    propagations: other_prp,
+                } => {
+                    // TODO: this is terribly slow
+                    prp.iter().all(|it| other_prp.contains(it))
+                        && other_prp.iter().all(|it| prp.contains(it))
+                }
+                _ => false,
+            },
+        }
+    }
 }
 
 impl WatchedLiterals {
+    /// Returns a new WatchedLiterals instance for the specified formula
     pub fn new(cnf: &Cnf) -> Self {
-        let watched_entries: Vec<WatchedLiteralEntry> = cnf
-            .clauses
-            .iter()
-            .map(|cls| Self::find_watchedliterals(cls, &Assignment::new()))
-            .collect();
-
-        let mut map: HashMap<LiteralTpl, Vec<usize>> = HashMap::new();
-
-        let mut insert = |lit: &LiteralTpl, cls: usize| {
-            map.entry(*lit).or_insert(Vec::new()).push(cls);
+        let mut watched_literals = WatchedLiterals {
+            watched_literals: vec![None; cnf.clauses.len()],
+            access_map: HashMap::new(),
         };
 
-        for (i, wle) in watched_entries.iter().enumerate() {
-            match wle {
-                WatchedLiteralEntry::TrueLiteral(lit) => insert(lit, i),
-                WatchedLiteralEntry::BothUnassigned(lit0, lit1) => {
-                    insert(lit0, i);
-                    insert(lit1, i);
+        for (clause_idx, clause) in cnf.clauses.iter().enumerate() {
+            let mut literals = clause.literals();
+            match (literals.next(), literals.next()) {
+                (Some(lit0), Some(lit1)) => {
+                    watched_literals.set_watch(clause_idx, lit0, lit1);
                 }
-                WatchedLiteralEntry::UnitClause(lit) => insert(lit, i),
-                WatchedLiteralEntry::ClauseUnsatisfiable => {}
+                _ => {
+                    // The clause contains less than two literals
+                    // So there is nothing to watch here
+                }
             }
         }
 
-        WatchedLiterals {
-            watched: watched_entries,
-            access_map: map,
+        watched_literals
+    }
+
+    /// Adds the given literal in the given clause to the watched list, without any further updates
+    fn set_watch(&mut self, clause_idx: usize, lit0: LiteralTpl, lit1: LiteralTpl) {
+        self.watched_literals[clause_idx] = Some((lit0, lit1));
+
+        self.access_map.entry(lit0).or_default().push(clause_idx);
+        self.access_map.entry(lit1).or_default().push(clause_idx);
+    }
+
+    fn replace_watched_literal(
+        &mut self,
+        clause_idx: usize,
+        old_wl: LiteralTpl,
+        new_wl: LiteralTpl,
+    ) {
+        // Delete old_wl in access map
+        match self.access_map.get_mut(&old_wl) {
+            Some(clause_indices) => {
+                let position = clause_indices
+                    .iter()
+                    .position(|&ci| ci == clause_idx)
+                    .expect("Cannot remove clause from list which does not contain it");
+
+                clause_indices.swap_remove(position);
+            }
+            None => {
+                unreachable!("Cannot remove watched literal without access map entry")
+            }
         }
+
+        // Replace watched literal in self.watched_literals
+        let wls = self.watched_literals[clause_idx]
+            .as_mut()
+            .expect("Specified clause index does not contain watched literals");
+
+        if wls.0 == old_wl {
+            *wls = (new_wl, wls.1);
+        } else if wls.1 == old_wl {
+            *wls = (wls.0, new_wl);
+        } else {
+            unreachable!("Specified clause index does not contain this watched literal");
+        }
+
+        // Add new entry to access map
+        self.access_map.entry(new_wl).or_default().push(clause_idx);
     }
 
-    pub fn is_unsatisfiable(&self) -> impl Iterator<Item = usize> + '_ {
-        self.watched
-            .iter()
-            .enumerate()
-            .filter_map(|(i, it)| match it {
-                WatchedLiteralEntry::ClauseUnsatisfiable => Some(i),
-                _ => None,
-            })
-    }
-
-    pub fn unit_clauses(&self) -> impl Iterator<Item = (usize, LiteralTpl)> + '_ {
-        self.watched
-            .iter()
-            .enumerate()
-            .filter_map(|(i, it)| match it {
-                WatchedLiteralEntry::UnitClause(lit) => Some((i, *lit)),
-                _ => None,
-            })
-    }
-
-    pub fn update(&mut self, new_assignment: LiteralTpl) {
+    pub fn update(
+        &mut self,
+        cnf: &Cnf,
+        assignment: &Assignment,
+        new_assignment: LiteralTpl,
+    ) -> UpdateResult {
         let (var, val) = new_assignment;
 
-        // Check if the opposite literal is conflicting with some clause
-        match self.access_map.get(&(var, !val)) {
-            Some(vec) => {
-                for &idx in vec.iter() {
-                    let wle = &self.watched[idx];
-                    match wle {
-                        WatchedLiteralEntry::TrueLiteral((var, val)) => {
-                            assert!(*var == new_assignment.0 && !val == new_assignment.1);
+        // Assert the new assignment does in fact contain the new assigned literal
+        assert!(matches!(
+            assignment.get(var),
+            Some(val) if val == val
+        ));
 
-                            // Since this is 
+        // All learned propagations
+        let mut propagations = Vec::new();
+
+        // Find all watched literals made unsatisfying due to the new assignment
+        let watched_literal = (var, !val);
+        match self.access_map.get_mut(&watched_literal) {
+            Some(clauses_vec) => {
+                for clause_idx in clauses_vec.clone() {
+                    let result = self.check_clause_after_update(
+                        clause_idx,
+                        &cnf.clauses[clause_idx],
+                        assignment,
+                        new_assignment,
+                        &mut propagations,
+                    );
+
+                    match result {
+                        CheckClauseAfterUpdateResult::KeepLiteral => {
+                            // Keep literal => retain element
                         }
-                        WatchedLiteralEntry::BothUnassigned(_, _) => {}
-                        WatchedLiteralEntry::UnitClause(_) => {}
-                        WatchedLiteralEntry::ClauseUnsatisfiable => {}
-                    }
+                        CheckClauseAfterUpdateResult::SwapTo(new_wl) => {
+                            self.replace_watched_literal(clause_idx, watched_literal, new_wl);
+                            // Do not keep literal => do not retain element
+                        }
+                        CheckClauseAfterUpdateResult::UnsatisfiableClause => {
+                            // The clause has become unsatisfiable
+                            return UpdateResult::Unsatisfiable;
+                        }
+                    };
                 }
+
+                // No clause has become unsatisfiable, the old watched literal could be replaced
+                return UpdateResult::Satisfiable { propagations };
             }
             None => {
                 // There is no conflict as there is no clause with the opposite literal
-                return;
+                return UpdateResult::Satisfiable { propagations };
             }
         }
     }
 
-    /// Tries to find two literals of the given clause, suitable to being watched literals
-    fn find_watchedliterals(cls: &Clause, a: &Assignment) -> WatchedLiteralEntry {
-        let literal_count = cls.literals().count();
-        if literal_count == 0 {
-            return WatchedLiteralEntry::ClauseUnsatisfiable;
+    /// Checks a clause containing a watched literal after it was assigned false
+    fn check_clause_after_update(
+        &mut self,
+        clause_idx: usize,
+        clause: &Clause,
+        assignment: &Assignment,
+        new_assignment: LiteralTpl,
+        propagations: &mut Vec<LiteralTpl>,
+    ) -> CheckClauseAfterUpdateResult {
+        let (wl0, wl1) = self.watched_literals[clause_idx]
+            .expect("Cannot update clause not having watched literals");
+
+        let other_wl = if wl0.0 == new_assignment.0 {
+            wl1
+        } else if wl1.0 == new_assignment.0 {
+            wl0
+        } else {
+            panic!("Old watched literal not contained in watched literal list")
+        };
+
+        match Self::find_replacement_literal(clause, assignment, other_wl) {
+            FindOtherSuitableLiteral::GivenLiteralSatisfying => {
+                // The watched literal one_wl is satisfying, so no changes needed
+                CheckClauseAfterUpdateResult::KeepLiteral
+            }
+            FindOtherSuitableLiteral::OtherLiteralSatisfying(other_lit) => {
+                // Another satisfying literal could be found
+                // Swap it with this one
+                CheckClauseAfterUpdateResult::SwapTo(other_lit)
+            }
+            FindOtherSuitableLiteral::MultipleUnassigned(other_lit) => {
+                // Another unassigned literal was found
+                // simply swap for this one
+                CheckClauseAfterUpdateResult::SwapTo(other_lit)
+            }
+            FindOtherSuitableLiteral::UnitClauseWithGiven => {
+                // The other_wl has become unit, so propagate it and keep the watched literals as is
+                // because other_wl becomes valid
+                propagations.push(other_wl);
+                CheckClauseAfterUpdateResult::KeepLiteral
+            }
+            FindOtherSuitableLiteral::UnitClause(other_lit) => {
+                // The only unassigned literal was found
+                // This is a unit clause, so we can propagate this literal
+                // We have to swap the old watched literal (which is false) with this one
+                // so it keeps getting watched
+                propagations.push(other_lit);
+                CheckClauseAfterUpdateResult::SwapTo(other_lit)
+            }
+            FindOtherSuitableLiteral::UnsatisfiableClause => {
+                // The clause was made unsatisfiable, a conflict occurred
+                CheckClauseAfterUpdateResult::UnsatisfiableClause
+            }
+        }
+    }
+
+    /// Finds a new literal suitable to be watched in a given clause, acknowledging the second watched literal
+    fn find_replacement_literal(
+        cls: &Clause,
+        assignment: &Assignment,
+        second_wl: LiteralTpl,
+    ) -> FindOtherSuitableLiteral {
+        // First check if second_wl is valid and thus no replacement needed
+        if let Some(true) = assignment.get_lit(second_wl) {
+            return FindOtherSuitableLiteral::GivenLiteralSatisfying;
         }
 
-        if literal_count == 1 {
-            // Special case if there is only one literal in the clause
-            let only_literal = cls.literals().next().unwrap();
-            return match a.get(only_literal.0) {
-                Some(val) if val == only_literal.1 => {
-                    WatchedLiteralEntry::TrueLiteral(only_literal)
+        let mut unassigned_literal = None;
+
+        for lit in cls.literals() {
+            match assignment.get_lit(lit) {
+                Some(true) => {
+                    // A satisfying watched literal was found
+                    return if lit == second_wl {
+                        // This case is already checked in the beginning
+                        unreachable!();
+                    } else {
+                        FindOtherSuitableLiteral::OtherLiteralSatisfying(lit)
+                    };
                 }
-                Some(_) => WatchedLiteralEntry::ClauseUnsatisfiable,
-                None => WatchedLiteralEntry::UnitClause(only_literal),
-            };
+
+                Some(false) => {
+                    // Literal is false, ignore
+                    continue;
+                }
+
+                None => {
+                    // Literal is unassigned
+
+                    match unassigned_literal {
+                        Some(stored_lit) => {
+                            // Multiple unassigned literals found
+                            // Return the one that is not second_wl
+                            return if stored_lit == second_wl {
+                                FindOtherSuitableLiteral::MultipleUnassigned(lit)
+                            } else if lit == second_wl {
+                                FindOtherSuitableLiteral::MultipleUnassigned(stored_lit)
+                            } else {
+                                // second_wl cannot be stored_lit and lit at the same time
+                                unreachable!()
+                            };
+                        }
+                        None => {
+                            // No other unassigned literal found (yet)
+                            unassigned_literal = Some(lit)
+                        }
+                    }
+                }
+            }
         }
+
+        // No true literal found and not multiple unassigned
+        match unassigned_literal {
+            Some(lit) => {
+                // One (and only one!) unassigned literal was found
+                // Check if this is second_wl
+                if lit == second_wl {
+                    FindOtherSuitableLiteral::UnitClauseWithGiven
+                } else {
+                    FindOtherSuitableLiteral::UnitClause(lit)
+                }
+            }
+            None => {
+                // No unassigned and no true literal was found
+                // This clause is unsatisfiable
+                return FindOtherSuitableLiteral::UnsatisfiableClause;
+            }
+        }
+    }
+
+    /*
+    /// Tries to find two literals of the given clause, suitable to being watched literals
+    fn find_suitable_watched_literals(
+        //  &self,
+        //  clsIdx: usize,
+        cls: &Clause,
+        assignment: &Assignment,
+    ) -> WatchedLiteralKind {
+        assert!(
+            cls.literals().count() >= 2,
+            "The clause needs to contain at least two literals"
+        );
+
+        /*let currently_watched =
+            self.watched_literals[clsIdx].expect("This clause does not use watched literals!");
+        let (watched0, watched1) = currently_watched;
+
+        let (false_lit, unassigned_lit) =
+        match (assignment.get_lit(watched0), assignment.get_lit(watched1)) {
+            (Some(true), _) | (_, Some(true)) => {
+                // At least one of the literals being watched is satisfied by the assignment
+                // So no changes needed
+                return UpdateKind::NoChanges;
+            }
+            (None, None) => {
+                // Both literals are unassigned, no changes needed
+                return UpdateKind::NoChanges;
+            }
+            (Some(false), None) => {
+                (watched0, watched1)
+            }
+            (None, Some(false)) => {
+                (watched1, watched0)
+            }
+            (Some(false), Some(false)) => {
+                panic!("Both literals are false")
+            }
+
+            _ => {}
+        }*/
 
         // there are at least two literals in this clause
         let mut unassigned_literals = Vec::with_capacity(2);
 
         for (var, val) in cls.literals() {
-            match a.get(var) {
+            match assignment.get(var) {
                 Some(a_val) if a_val == val => {
                     // This literal is true, as it is assigned its val from the assignment
-                    return WatchedLiteralEntry::TrueLiteral((var, val));
+                    return WatchedLiteralKind::ClauseSatisfied((var, val));
                 }
                 Some(_) => {
                     // This literal is not unassigned, but is false
@@ -140,16 +363,16 @@ impl WatchedLiterals {
         return match unassigned_literals.as_slice() {
             &[lit0, lit1] => {
                 // There are two unassigned literals in this clause
-                WatchedLiteralEntry::BothUnassigned(lit0, lit1)
+                WatchedLiteralKind::BothUnassigned(lit0, lit1)
             }
             &[only_lit] => {
                 // There is only one unassigned literal in this clause
-                WatchedLiteralEntry::UnitClause(only_lit)
+                WatchedLiteralKind::UnitClause(only_lit)
             }
             &[] => {
                 // There is no unassigned literal and no true one
                 // so this clause is unsatisfiable
-                WatchedLiteralEntry::ClauseUnsatisfiable
+                WatchedLiteralKind::ClauseUnsatisfiable
             }
             &[_, _, _, ..] => {
                 // More than two unassigned literals
@@ -157,149 +380,358 @@ impl WatchedLiterals {
                 unreachable!()
             }
         };
-    }
+    }*/
 }
 
 impl Debug for WatchedLiterals {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            self.watched
-                .iter()
-                .map(|it| format!(
-                    "[{}]",
-                    match it {
-                        WatchedLiteralEntry::ClauseUnsatisfiable => String::from("F"),
-                        WatchedLiteralEntry::TrueLiteral(lit) => format!("T{:?}", lit),
-                        WatchedLiteralEntry::BothUnassigned(a, b) => format!("{:?}{:?}", a, b),
-                        WatchedLiteralEntry::UnitClause(lit) => format!("U{:?}", lit),
-                    }
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )?;
+        write!(f, "{{")?;
+        for (literal, watched_in) in self.access_map.iter() {
+            write!(
+                f,
+                "{:+02}: {:?},",
+                literal.0 as i64 * if literal.1 { 1 } else { -1 },
+                watched_in
+            )?;
+        }
+        write!(f, "}}")?;
 
         Ok(())
     }
 }
 
-#[derive(Debug)]
-enum WatchedLiteralEntry {
-    TrueLiteral(LiteralTpl),
-    BothUnassigned(LiteralTpl, LiteralTpl),
+#[derive(Debug, PartialEq, Eq)]
+enum FindOtherSuitableLiteral {
+    GivenLiteralSatisfying,
+    OtherLiteralSatisfying(LiteralTpl),
+    MultipleUnassigned(LiteralTpl),
+    UnitClauseWithGiven,
     UnitClause(LiteralTpl),
+    UnsatisfiableClause,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CheckClauseAfterUpdateResult {
+    KeepLiteral,
+    SwapTo(LiteralTpl),
+    UnsatisfiableClause,
+}
+
+enum UpdateKind {
+    /// The currently watched literals are fine
+    NoChanges,
+
+    NeedsUpdate {
+        old: LiteralTpl,
+        new: LiteralTpl,
+    },
+}
+
+#[derive(Debug)]
+enum WatchedLiteralKind {
+    /// There is a satisfied literal in the clause
+    ClauseSatisfied(LiteralTpl),
+    /// Two unassigned literals were found
+    BothUnassigned(LiteralTpl, LiteralTpl),
+    /// One unassigned literal found representing a unit clause
+    UnitClause(LiteralTpl),
+    /// The clause has become unsatisfiable
     ClauseUnsatisfiable,
 }
 
-impl PartialEq for WatchedLiteralEntry {
+impl PartialEq for WatchedLiteralKind {
     fn eq(&self, other: &Self) -> bool {
         match self {
-            WatchedLiteralEntry::TrueLiteral(literal) => match other {
-                WatchedLiteralEntry::TrueLiteral(other_literal) => literal == other_literal,
+            Self::ClauseSatisfied(literal) => match other {
+                Self::ClauseSatisfied(other_literal) => literal == other_literal,
                 _ => false,
             },
-            WatchedLiteralEntry::BothUnassigned(lit0, lit1) => match other {
-                WatchedLiteralEntry::BothUnassigned(other_lit0, other_lit1) => {
+            Self::BothUnassigned(lit0, lit1) => match other {
+                Self::BothUnassigned(other_lit0, other_lit1) => {
                     (lit0 == other_lit0 && lit1 == other_lit1)
                         || (lit0 == other_lit1 && lit1 == other_lit0)
                 }
                 _ => false,
             },
-            WatchedLiteralEntry::UnitClause(literal) => match other {
-                WatchedLiteralEntry::UnitClause(other_literal) => literal == other_literal,
+            Self::UnitClause(literal) => match other {
+                Self::UnitClause(other_literal) => literal == other_literal,
                 _ => false,
             },
-            WatchedLiteralEntry::ClauseUnsatisfiable => {
-                matches!(other, WatchedLiteralEntry::ClauseUnsatisfiable)
+            Self::ClauseUnsatisfiable => {
+                matches!(other, Self::ClauseUnsatisfiable)
             }
         }
     }
 }
 
-impl Eq for WatchedLiteralEntry {}
+impl Eq for WatchedLiteralKind {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::input::parse_cnf_from_str;
 
+    fn two_literal_eq((a0, a1): (LiteralTpl, LiteralTpl), b0: LiteralTpl, b1: LiteralTpl) -> bool {
+        (a0 == b0 && a1 == b1) || (a0 == b1 && a1 == b0)
+    }
+
+    #[test]
+    fn test_watchedliteral_new() {
+        let cnf = parse_cnf_from_str("false\n1\n-15\n2 3\n1 -4\n1 2 3\n-4 5 -6").unwrap();
+        let wl = WatchedLiterals::new(&cnf);
+
+        // WatchedLiteral#watched_literals
+        assert_eq!(&wl.watched_literals[0..3], &[None, None, None]);
+        assert!(two_literal_eq(
+            wl.watched_literals[3].unwrap(),
+            (2, true),
+            (3, true)
+        ));
+        assert!(two_literal_eq(
+            wl.watched_literals[4].unwrap(),
+            (1, true),
+            (4, false)
+        ));
+        assert!(two_literal_eq(
+            wl.watched_literals[5].unwrap(),
+            (1, true),
+            (2, true)
+        ));
+        assert!(two_literal_eq(
+            wl.watched_literals[6].unwrap(),
+            (4, false),
+            (5, true)
+        ));
+
+        // WatchedLiteral#access_map
+        let mut map = HashMap::new();
+        map.insert((1, true), vec![4, 5]);
+        map.insert((2, true), vec![3, 5]);
+        map.insert((3, true), vec![3]);
+        map.insert((4, false), vec![4, 6]);
+        map.insert((5, true), vec![6]);
+        assert_eq!(wl.access_map, map);
+    }
+
+    #[test]
+    fn test_watchedliteral_replacement() {
+        let cnf = parse_cnf_from_str("2 3\n1 -4\n1 2 3\n-4 5 -6").unwrap();
+
+        assert_eq!(
+            WatchedLiterals::find_replacement_literal(
+                &cnf.clauses[0],
+                &Assignment::new().with(2, false),
+                (3, true)
+            ),
+            FindOtherSuitableLiteral::UnitClauseWithGiven
+        );
+
+        assert_eq!(
+            WatchedLiterals::find_replacement_literal(
+                &cnf.clauses[3],
+                &Assignment::new().with(4, true).with(6, true),
+                (5, true)
+            ),
+            FindOtherSuitableLiteral::UnitClauseWithGiven
+        );
+
+        assert_eq!(
+            WatchedLiterals::find_replacement_literal(
+                &cnf.clauses[3],
+                &Assignment::new().with(4, true).with(6, true),
+                (6, false)
+            ),
+            FindOtherSuitableLiteral::UnitClause((5, true))
+        );
+
+        assert_eq!(
+            WatchedLiterals::find_replacement_literal(
+                &cnf.clauses[3],
+                &Assignment::new().with(4, true).with(6, false),
+                (6, false)
+            ),
+            FindOtherSuitableLiteral::GivenLiteralSatisfying
+        );
+
+        assert_eq!(
+            WatchedLiterals::find_replacement_literal(
+                &cnf.clauses[3],
+                &Assignment::new().with(4, true).with(6, false),
+                (5, true)
+            ),
+            FindOtherSuitableLiteral::OtherLiteralSatisfying((6, false))
+        );
+
+        assert_eq!(
+            WatchedLiterals::find_replacement_literal(
+                &cnf.clauses[3],
+                &Assignment::new().with(6, true),
+                (5, true)
+            ),
+            FindOtherSuitableLiteral::MultipleUnassigned((4, false))
+        );
+
+        assert_eq!(
+            WatchedLiterals::find_replacement_literal(
+                &cnf.clauses[3],
+                &Assignment::new().with(4, true).with(5, false).with(6, true),
+                (5, true)
+            ),
+            FindOtherSuitableLiteral::UnsatisfiableClause
+        );
+    }
+
+    #[test]
+    fn test_watchedliteral_checkclauseafterupdate_simple() {
+        let cnf = parse_cnf_from_str("2 3\n1 -4\n1 2 3\n-4 5 -6").unwrap();
+        let mut wl = WatchedLiterals::new(&cnf);
+        let mut propagations = Vec::new();
+        let result = wl.check_clause_after_update(
+            0,
+            &cnf.clauses[0],
+            &Assignment::new().with(2, false),
+            (2, false),
+            &mut propagations,
+        );
+
+        // Check correct result, literal is kept, as other (3) is now set to valid
+        assert_eq!(result, CheckClauseAfterUpdateResult::KeepLiteral);
+
+        // Test correct propagations
+        assert_eq!(propagations, vec![(3, true)]);
+    }
+
+    #[test]
+    fn test_watchedliteral_update_simple() {
+        let cnf = parse_cnf_from_str("2 3").unwrap();
+        let mut wl = WatchedLiterals::new(&cnf);
+        let result = wl.update(&cnf, &Assignment::new().with(2, false), (2, false));
+
+        assert!(matches!(
+        result,
+        UpdateResult::Satisfiable {
+            propagations 
+        } if propagations == vec![(3, true)]));
+    }
+
+    #[test]
+    fn test_watchedliteral_update_multi() {
+        let cnf = parse_cnf_from_str("2 3 -4 5 -6").unwrap();
+        let mut wl = WatchedLiterals::new(&cnf);
+        let mut assignment = Assignment::new();
+
+        // Watched: 2 3
+        assignment.change(5, false);
+        let result = wl.update(&cnf, &assignment, (5, false));
+        assert_eq!(
+            result,
+            UpdateResult::Satisfiable {
+                propagations: vec![]
+            }
+        );
+
+        // Watched: 2 3
+        assignment.change(3, false);
+        let result = wl.update(&cnf, &assignment, (3, false));
+        assert_eq!(
+            result,
+            UpdateResult::Satisfiable {
+                propagations: vec![]
+            }
+        );
+        let (lit0, lit1) = wl.watched_literals[0].unwrap();
+        assert!([lit0, lit1].contains(&(2, true)));
+        assert!([lit0, lit1].contains(&(4, false)) || [lit0, lit1].contains(&(6, false)));
+    }
+
+    #[test]
+    fn test_watchedliteral_replace() {
+        let mut wl = WatchedLiterals::new(&parse_cnf_from_str("1 2 3").unwrap());
+        wl.replace_watched_literal(0, (2, true), (3, true));
+
+        assert_eq!(wl.watched_literals, vec![Some(((1, true), (3, true)))]);
+        assert_eq!(wl.access_map, {
+            let mut map = HashMap::new();
+            map.insert((1, true), vec![0]);
+            map.insert((2, true), vec![]);
+            map.insert((3, true), vec![0]);
+            map
+        });
+    }
+
     #[test]
     fn test_watchedliteral_eq() {
         assert_eq!(
-            WatchedLiteralEntry::ClauseUnsatisfiable,
-            WatchedLiteralEntry::ClauseUnsatisfiable
+            WatchedLiteralKind::ClauseUnsatisfiable,
+            WatchedLiteralKind::ClauseUnsatisfiable
         );
         assert_eq!(
-            WatchedLiteralEntry::TrueLiteral((37, true)),
-            WatchedLiteralEntry::TrueLiteral((37, true))
+            WatchedLiteralKind::ClauseSatisfied((37, true)),
+            WatchedLiteralKind::ClauseSatisfied((37, true))
         );
         assert_eq!(
-            WatchedLiteralEntry::TrueLiteral((37, false)),
-            WatchedLiteralEntry::TrueLiteral((37, false))
+            WatchedLiteralKind::UnitClause((42, true)),
+            WatchedLiteralKind::UnitClause((42, true))
         );
         assert_eq!(
-            WatchedLiteralEntry::UnitClause((42, true)),
-            WatchedLiteralEntry::UnitClause((42, true))
+            WatchedLiteralKind::UnitClause((42, false)),
+            WatchedLiteralKind::UnitClause((42, false))
         );
         assert_eq!(
-            WatchedLiteralEntry::UnitClause((42, false)),
-            WatchedLiteralEntry::UnitClause((42, false))
+            WatchedLiteralKind::BothUnassigned((42, true), (52, false)),
+            WatchedLiteralKind::BothUnassigned((42, true), (52, false))
         );
         assert_eq!(
-            WatchedLiteralEntry::BothUnassigned((42, true), (52, false)),
-            WatchedLiteralEntry::BothUnassigned((42, true), (52, false))
+            WatchedLiteralKind::BothUnassigned((42, false), (52, true)),
+            WatchedLiteralKind::BothUnassigned((42, false), (52, true))
         );
         assert_eq!(
-            WatchedLiteralEntry::BothUnassigned((42, false), (52, true)),
-            WatchedLiteralEntry::BothUnassigned((42, false), (52, true))
-        );
-        assert_eq!(
-            WatchedLiteralEntry::BothUnassigned((42, false), (52, true)),
-            WatchedLiteralEntry::BothUnassigned((52, true), (42, false))
+            WatchedLiteralKind::BothUnassigned((42, false), (52, true)),
+            WatchedLiteralKind::BothUnassigned((52, true), (42, false))
         );
     }
 
     #[test]
     fn test_watchedliteral_neq() {
         assert_ne!(
-            WatchedLiteralEntry::TrueLiteral((37, true)),
-            WatchedLiteralEntry::TrueLiteral((37, false))
+            WatchedLiteralKind::UnitClause((42, true)),
+            WatchedLiteralKind::UnitClause((42, false))
         );
         assert_ne!(
-            WatchedLiteralEntry::TrueLiteral((37, false)),
-            WatchedLiteralEntry::TrueLiteral((38, false))
+            WatchedLiteralKind::UnitClause((42, false)),
+            WatchedLiteralKind::UnitClause((43, false))
         );
         assert_ne!(
-            WatchedLiteralEntry::UnitClause((42, true)),
-            WatchedLiteralEntry::UnitClause((42, false))
+            WatchedLiteralKind::ClauseSatisfied((42, false)),
+            WatchedLiteralKind::ClauseSatisfied((43, false))
         );
         assert_ne!(
-            WatchedLiteralEntry::UnitClause((42, false)),
-            WatchedLiteralEntry::UnitClause((43, false))
+            WatchedLiteralKind::ClauseSatisfied((42, false)),
+            WatchedLiteralKind::ClauseSatisfied((42, true))
         );
         assert_ne!(
-            WatchedLiteralEntry::BothUnassigned((42, true), (52, false)),
-            WatchedLiteralEntry::BothUnassigned((42, true), (52, true))
+            WatchedLiteralKind::BothUnassigned((42, true), (52, false)),
+            WatchedLiteralKind::BothUnassigned((42, true), (52, true))
         );
         assert_ne!(
-            WatchedLiteralEntry::BothUnassigned((42, false), (52, true)),
-            WatchedLiteralEntry::BothUnassigned((42, true), (52, true))
+            WatchedLiteralKind::BothUnassigned((42, false), (52, true)),
+            WatchedLiteralKind::BothUnassigned((42, true), (52, true))
         );
         assert_ne!(
-            WatchedLiteralEntry::BothUnassigned((42, true), (52, false)),
-            WatchedLiteralEntry::BothUnassigned((43, true), (52, false))
+            WatchedLiteralKind::BothUnassigned((42, true), (52, false)),
+            WatchedLiteralKind::BothUnassigned((43, true), (52, false))
         );
         assert_ne!(
-            WatchedLiteralEntry::BothUnassigned((42, false), (52, true)),
-            WatchedLiteralEntry::BothUnassigned((42, false), (53, true))
+            WatchedLiteralKind::BothUnassigned((42, false), (52, true)),
+            WatchedLiteralKind::BothUnassigned((42, false), (53, true))
         );
         assert_ne!(
-            WatchedLiteralEntry::BothUnassigned((42, true), (52, false)),
-            WatchedLiteralEntry::BothUnassigned((52, true), (42, false))
+            WatchedLiteralKind::BothUnassigned((42, true), (52, false)),
+            WatchedLiteralKind::BothUnassigned((52, true), (42, false))
         );
     }
 
+    /*
     #[test]
     fn test_find_watchedliterals_empty_assignment() {
         let cnf = parse_cnf_from_str("false\n1\n-15\n2 3\n1 -4\n1 2 3\n-4 5 -6")
@@ -309,33 +741,34 @@ mod tests {
 
         // Test 0, 1 literals
         assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cnf[0], &empty_assignment),
-            WatchedLiteralEntry::ClauseUnsatisfiable
+            WatchedLiterals::find_suitable_watched_literals(&cnf[0], &empty_assignment),
+            WatchedLiteralKind::ClauseUnsatisfiable
         );
         assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cnf[1], &empty_assignment),
-            WatchedLiteralEntry::UnitClause((1, true))
+            WatchedLiterals::find_suitable_watched_literals(&cnf[1], &empty_assignment),
+            WatchedLiteralKind::UnitClause((1, true))
         );
         assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cnf[2], &empty_assignment),
-            WatchedLiteralEntry::UnitClause((15, false))
+            WatchedLiterals::find_suitable_watched_literals(&cnf[2], &empty_assignment),
+            WatchedLiteralKind::UnitClause((15, false))
         );
 
         // Test 2 literals
         assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cnf[3], &empty_assignment),
-            WatchedLiteralEntry::BothUnassigned((2, true), (3, true))
+            WatchedLiterals::find_suitable_watched_literals(&cnf[3], &empty_assignment),
+            WatchedLiteralKind::BothUnassigned((2, true), (3, true))
         );
         assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cnf[4], &empty_assignment),
-            WatchedLiteralEntry::BothUnassigned((1, true), (4, false))
+            WatchedLiterals::find_suitable_watched_literals(&cnf[4], &empty_assignment),
+            WatchedLiteralKind::BothUnassigned((1, true), (4, false))
         );
 
         // Test more literals
         {
-            let result = WatchedLiterals::find_watchedliterals(&cnf[5], &empty_assignment);
+            let result =
+                WatchedLiterals::find_suitable_watched_literals(&cnf[5], &empty_assignment);
             match result {
-                WatchedLiteralEntry::BothUnassigned(lit0, lit1) => {
+                WatchedLiteralKind::BothUnassigned(lit0, lit1) => {
                     let expected = [(1, true), (2, true), (3, true)];
                     assert!(lit0 != lit1);
                     assert!(
@@ -351,9 +784,10 @@ mod tests {
         }
 
         {
-            let result = WatchedLiterals::find_watchedliterals(&cnf[6], &empty_assignment);
+            let result =
+                WatchedLiterals::find_suitable_watched_literals(&cnf[6], &empty_assignment);
             match result {
-                WatchedLiteralEntry::BothUnassigned(lit0, lit1) => {
+                WatchedLiteralKind::BothUnassigned(lit0, lit1) => {
                     let expected = [(4, false), (5, true), (6, false)];
                     assert!(lit0 != lit1);
                     assert!(
@@ -367,84 +801,90 @@ mod tests {
                 _ => assert!(false),
             }
         }
-    }
+    }*/
+
+    /*
+        #[test]
+        fn test_find_watchedliterals_with_assignment() {
+            let cls = parse_cnf_from_str(
+                "2\n2 4 6\n-1 -3 -5
+    1\n-2\n-1 2 3 4\n-1 2 -3 -4
+    7\n-7\n-1 7 2\n-1 -7 2
+    -1 2 7 -3 8\n-7 -8 -1 2 -3",
+            )
+            .unwrap()
+            .clauses;
+            let assignment = Assignment::new()
+                .with(1, true)
+                .with(2, false)
+                .with(3, true)
+                .with(4, false)
+                .with(5, true)
+                .with(6, false);
+
+            // Unsatisfiable
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[0], &assignment),
+                WatchedLiteralKind::ClauseUnsatisfiable
+            );
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[1], &assignment),
+                WatchedLiteralKind::ClauseUnsatisfiable
+            );
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[2], &assignment),
+                WatchedLiteralKind::ClauseUnsatisfiable
+            );
+
+            // True
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[3], &assignment),
+                WatchedLiteralKind::ClauseSatisfied((1, true))
+            );
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[4], &assignment),
+                WatchedLiteralKind::ClauseSatisfied((2, false))
+            );
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[5], &assignment),
+                WatchedLiteralKind::ClauseSatisfied((3, true))
+            );
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[6], &assignment),
+                WatchedLiteralKind::ClauseSatisfied((4, false))
+            );
+
+            // Unit clause
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[7], &assignment),
+                WatchedLiteralKind::UnitClause((7, true))
+            );
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[8], &assignment),
+                WatchedLiteralKind::UnitClause((7, false))
+            );
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[9], &assignment),
+                WatchedLiteralKind::UnitClause((7, true))
+            );
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[10], &assignment),
+                WatchedLiteralKind::UnitClause((7, false))
+            );
+
+            // Both unassigned
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[11], &assignment),
+                WatchedLiteralKind::BothUnassigned((7, true), (8, true))
+            );
+            assert_eq!(
+                WatchedLiterals::find_suitable_watched_literals(&cls[12], &assignment),
+                WatchedLiteralKind::BothUnassigned((7, false), (8, false))
+            );
+        }*/
 
     #[test]
-    fn test_find_watchedliterals_with_assignment() {
-        let cls = parse_cnf_from_str(
-            "2\n2 4 6\n-1 -3 -5
-1\n-2\n-1 2 3 4\n-1 2 -3 -4
-7\n-7\n-1 7 2\n-1 -7 2
--1 2 7 -3 8\n-7 -8 -1 2 -3",
-        )
-        .unwrap()
-        .clauses;
-        let assignment = Assignment::new()
-            .with(1, true)
-            .with(2, false)
-            .with(3, true)
-            .with(4, false)
-            .with(5, true)
-            .with(6, false);
-
-        // Unsatisfiable
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[0], &assignment),
-            WatchedLiteralEntry::ClauseUnsatisfiable
-        );
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[1], &assignment),
-            WatchedLiteralEntry::ClauseUnsatisfiable
-        );
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[2], &assignment),
-            WatchedLiteralEntry::ClauseUnsatisfiable
-        );
-
-        // True
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[3], &assignment),
-            WatchedLiteralEntry::TrueLiteral((1, true))
-        );
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[4], &assignment),
-            WatchedLiteralEntry::TrueLiteral((2, false))
-        );
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[5], &assignment),
-            WatchedLiteralEntry::TrueLiteral((3, true))
-        );
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[6], &assignment),
-            WatchedLiteralEntry::TrueLiteral((4, false))
-        );
-
-        // Unit clause
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[7], &assignment),
-            WatchedLiteralEntry::UnitClause((7, true))
-        );
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[8], &assignment),
-            WatchedLiteralEntry::UnitClause((7, false))
-        );
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[9], &assignment),
-            WatchedLiteralEntry::UnitClause((7, true))
-        );
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[10], &assignment),
-            WatchedLiteralEntry::UnitClause((7, false))
-        );
-
-        // Both unassigned
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[11], &assignment),
-            WatchedLiteralEntry::BothUnassigned((7, true), (8, true))
-        );
-        assert_eq!(
-            WatchedLiterals::find_watchedliterals(&cls[12], &assignment),
-            WatchedLiteralEntry::BothUnassigned((7, false), (8, false))
-        );
+    fn test_watchedliterals_prop() {
+        let wl = WatchedLiterals::new(&parse_cnf_from_str("1 2 3\n-2 4\n-3\n-4 -1 -5").unwrap());
     }
 }
