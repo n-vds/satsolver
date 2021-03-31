@@ -16,8 +16,26 @@ impl Assignment {
         it
     }
 
+    /// Gets the value (true or false) that is assigned to this variable or None if it is unassigned
     pub fn get(&self, var: Var) -> Option<bool> {
         self.0.get(&var).map(|it| *it)
+    }
+
+    /// Gets whether this literal is valid, invalid or unassigned
+    ///
+    /// If the literal is valid (its variable is set to true), this function returns Some(true);
+    /// if it is invalid (its variable set to false), this function returns Some(false).
+    /// If the literal's variable is unassigned, this function returns None
+    pub fn get_lit(&self, lit: LiteralTpl) -> Option<bool> {
+        match self.0.get(&lit.0) {
+            Some(&val) => Some(val == lit.1),
+            None => None,
+        }
+    }
+
+    /// Checks wether this assignment satisfies the given literal
+    pub fn satisfies(&self, lit: LiteralTpl) -> bool {
+        self.0.get(&lit.0).map(|&val| val == lit.1).unwrap_or(false)
     }
 
     pub fn change(&mut self, var: Var, val: bool) {
