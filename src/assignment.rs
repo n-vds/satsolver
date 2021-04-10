@@ -57,6 +57,10 @@ impl Assignment {
     pub fn highest_assigned_var(&self) -> Option<Var> {
         self.0.keys().copied().max()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Var, bool)> + '_ {
+        self.0.iter().map(|(k, v)| (*k, *v))
+    }
 }
 
 impl Debug for Assignment {
