@@ -47,6 +47,7 @@ pub fn read_cnf_interactive() -> Cnf {
     phi
 }
 
+#[cfg(test)]
 pub fn parse_cnf_from_str(input: &str) -> Option<Cnf> {
     let mut cnf = Cnf::new();
 
