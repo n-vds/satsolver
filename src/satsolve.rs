@@ -31,8 +31,6 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
 
     // solve
     let max = cnf.highest_var();
-    //    let initial_assignment = calc_bool_prop(&cnf, &Assignment::new()).unwrap_or_default();
-
     let mut watchedliterals = WatchedLiterals::new(&cnf);
     println!("Watching literals: {:?}", watchedliterals);
     let initial_assignment = match calc_initial_assignment(&watchedliterals) {
@@ -142,67 +140,14 @@ fn calc_initial_assignment(watchedliterals: &WatchedLiterals) -> Option<Assignme
     Some(assignment)
 }
 
-/// Calculates the boolean propagation
 ///
-/// Returns a new assignment based on the given one,
-/// which contains all assignments known by boolean propagation
-/// or None if no variable could be propagated
-fn calc_bool_prop(cnf: &Cnf, a: &Assignment) -> Option<Assignment> {
-    let mut new_a = None;
-    let mut new_assignments = HashMap::new();
-
-    loop {
-        for clause in &cnf.clauses {
-            if let Some((var, val)) = calc_bool_prop_cls(
-                clause, //
-                new_a.as_ref().unwrap_or(a),
-            ) {
-                new_assignments.insert(var, val);
             }
-        }
 
-        if !new_assignments.is_empty() {
-            let result = new_a
-                .as_ref()
-                .unwrap_or(a)
-                .with_all(new_assignments.iter().map(|(&var, &val)| (var, val)));
-            new_assignments.clear();
-            new_a = Some(result);
-        } else {
-            return new_a;
         }
     }
 }
 
-fn calc_bool_prop_cls(cls: &Clause, a: &Assignment) -> Option<(Var, bool)> {
-    // Check if clause is not satisfied and only one literal is unset
-    let mut unassigned = None;
-
-    for (var, val) in cls.literals() {
-        match a.get(var) {
-            Some(assignment) => {
-                // This literal is assigned a value by a
-                if val == assignment {
-                    // This literal is satisfied, so is this whole clause
-                    // There is not anything to be propagated from a satisfied clause
-                    return None;
-                } else {
-                    // This literal is false, so it cannot be propagated
-                    // This branch is intentionally left empty
-                }
-            }
-            None => {
-                // There is a literal that is not yet assigned a value
-                // Check how many of those there are
-                match unassigned {
-                    None => {
-                        // This is the only unassigned variable so far
-                        unassigned = Some((var, val));
                     }
-                    Some(_) => {
-                        // There is already another literal that is unassigned,
-                        // so this is the second one. Either one of them
-                        // might be true, so there is nothing to propagate
                         return None;
                     }
                 }
@@ -210,7 +155,6 @@ fn calc_bool_prop_cls(cls: &Clause, a: &Assignment) -> Option<(Var, bool)> {
         }
     }
 
-    unassigned
 }
 
 /// Backtracks the given decision levels,
@@ -276,97 +220,6 @@ mod tests {
         assert!(is_satisfiable(&parse_cnf_from_str("1 2 3\n-2 -3\n-3\n-1").unwrap()).0);
         assert!(is_satisfiable(&parse_cnf_from_str("1 2 3 4\n-2 -3\n-3\n-1").unwrap()).0);
         assert!(is_satisfiable(&parse_cnf_from_str("1 2 3\n-2 -3\n-3 2\n-1").unwrap()).0);
-    }
-
-    #[test]
-    fn test_prop_cls() {
-        let clauses = parse_cnf_from_str("1\n-2\n1 -2 3").unwrap().clauses;
-        assert_eq!(
-            calc_bool_prop_cls(&clauses[0], &Assignment::new()),
-            Some((1, true))
-        );
-        assert_eq!(
-            calc_bool_prop_cls(&clauses[1], &Assignment::new()),
-            Some((2, false))
-        );
-        assert_eq!(calc_bool_prop_cls(&clauses[2], &Assignment::new()), None);
-        assert_eq!(
-            calc_bool_prop_cls(
-                &clauses[2],
-                &Assignment::new().with(1, false).with(3, false)
-            ),
-            Some((2, false))
-        );
-        assert_eq!(
-            calc_bool_prop_cls(
-                &clauses[2], //
-                &Assignment::new().with(1, false).with(2, true)
-            ),
-            Some((3, true))
-        );
-    }
-
-    #[test]
-    fn test_prop_cls_no_prop() {
-        let clauses = parse_cnf_from_str("1 2\n-2 -1\n1 -2 3").unwrap().clauses;
-        assert_eq!(calc_bool_prop_cls(&clauses[0], &Assignment::new()), None);
-        assert_eq!(calc_bool_prop_cls(&clauses[1], &Assignment::new()), None);
-        assert_eq!(calc_bool_prop_cls(&clauses[2], &Assignment::new()), None);
-        assert_eq!(
-            calc_bool_prop_cls(&clauses[2], &Assignment::new().with(1, false).with(3, true)),
-            None
-        );
-        assert_eq!(
-            calc_bool_prop_cls(
-                &clauses[2], //
-                &Assignment::new().with(1, false).with(2, false)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn test_prop() {
-        assert_eq!(
-            calc_bool_prop(&parse_cnf_from_str("1 2 3").unwrap(), &Assignment::new()),
-            None
-        );
-        assert_eq!(
-            calc_bool_prop(&parse_cnf_from_str("1\n-2\n3").unwrap(), &Assignment::new()),
-            Some(
-                Assignment::new() //
-                    .with(1, true)
-                    .with(2, false)
-                    .with(3, true)
-            )
-        );
-        assert_eq!(
-            calc_bool_prop(
-                &parse_cnf_from_str("1 2 3\n-2 4\n-3\n-4 1 -5").unwrap(),
-                &Assignment::new().with(1, false)
-            ),
-            Some(
-                Assignment::new() //
-                    .with(1, false)
-                    .with(2, true)
-                    .with(3, false)
-                    .with(4, true)
-                    .with(5, false)
-            )
-        );
-        assert_eq!(
-            calc_bool_prop(
-                &parse_cnf_from_str("1 2 3\n-2 4\n-3\n-4 -1 -5").unwrap(),
-                &Assignment::new().with(1, false)
-            ),
-            Some(
-                Assignment::new() //
-                    .with(1, false)
-                    .with(2, true)
-                    .with(3, false)
-                    .with(4, true)
-            )
-        );
     }
 
     #[test]
