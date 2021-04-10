@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::VecDeque;
 
 use crate::{
     assignment::Assignment,
-    cnf::{Clause, Cnf, Var},
-    watchedliterals::WatchedLiterals,
+    cnf::{Cnf, LiteralTpl, Var},
+    watchedliterals::{UpdateResult, WatchedLiterals},
 };
 #[derive(Debug, PartialEq)]
 struct DecisionLevel {
@@ -30,15 +30,36 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
     }
 
     // solve
-    let max = cnf.highest_var();
     let mut watchedliterals = WatchedLiterals::new(&cnf);
-    println!("Watching literals: {:?}", watchedliterals);
-    let initial_assignment = match calc_initial_assignment(&watchedliterals) {
-        Some(a) => a,
-        None => return (false, stats), // unsatisfiable
-    };
 
+    let initial_assignment = {
+        // first get clauses with single literals, they have to be true
+        let mut assignment = match get_assignment_from_single_clauses(&cnf) {
+            Some(a) => a,
+            None => return (false, stats), // unsatisfiable
+        };
+        let assignments_vec = assignment.iter().collect::<Vec<_>>();
+
+        // propagate these
+        for new_literal in assignments_vec {
+            match propagate_assignment(new_literal, &mut assignment, cnf, &mut watchedliterals) {
+                ExecuteAssignmentResult::Unsatisfiable => {
+                    // Conflict in DL0
+                    return (false, stats);
+                }
+                ExecuteAssignmentResult::AssignmentDone => {
+                    // left intentionally empty
+                }
+            }
+        }
+
+        // after propagation this assignment contains all clauses with a single literal and their propagations
+        assignment
+    };
     println!("---Initial: {:?}", initial_assignment);
+
+    let max = cnf.highest_var();
+
     stats.tries += 1;
     if cnf.is_satisfied(&initial_assignment) {
         return (true, stats);
@@ -46,64 +67,119 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
 
     let mut dec_levels: Vec<DecisionLevel> = Vec::new();
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum State {
+        CheckCurrentLevel,
+        AssignNewVar,
+        NewDecLevelWithAssignment(LiteralTpl),
+        PropagateAssignment(LiteralTpl),
+        Backtrack,
+    }
+    let mut state = State::CheckCurrentLevel;
+
     loop {
-        // Check for satisfiability
-        if let Some(dl) = dec_levels.last() {
-            if check_assignment(&cnf, &dl.assignment, &mut stats) {
-                return (true, stats);
+        match state {
+            State::CheckCurrentLevel => {
+                // Check for satisfiability
+                if let Some(dl) = dec_levels.last() {
+                    if check_assignment(&cnf, &dl.assignment, &mut stats) {
+                        return (true, stats);
+                    }
+                }
+                state = State::AssignNewVar;
             }
-        }
 
-        // pick a new variable to set
-        // start with 1 + highest from last dl or 0
-        let var = {
-            let mut var = 1 + dec_levels
-                .last()
-                .and_then(|dl| dl.assignment.highest_assigned_var())
-                .unwrap_or(0);
+            State::AssignNewVar => {
+                // pick a new variable to set
+                let var = choose_next_var(max, &dec_levels, &initial_assignment);
 
-            // increase picked var while it is already set (due to bcp)
-            loop {
-                let assigned = dec_levels
+                // Check if the assignment is complete, i.e. no variable to be set could be found
+                let var = match var {
+                    None => {
+                        // Assignment complete, therefore backtrack
+                        state = State::Backtrack;
+                        continue;
+                    }
+                    Some(var) => var,
+                };
+
+                // Assignment incomplete, we found a new variable to set
+                state = State::NewDecLevelWithAssignment((var, FIRST_TRY));
+            }
+
+            State::Backtrack => {
+                print!("Backtracking... ");
+                let result = backtrack(&mut dec_levels);
+                match result {
+                    BacktrackResult::UnsatisfiableFormula => {
+                        // Return unsat
+                        println!("Unsatisfiable!");
+                        return (false, stats);
+                    }
+                    BacktrackResult::ContinueWith(new_assignment) => {
+                        // Backtracking did undo multiple decision levels and the resulting decision level had this assignment
+                        // Skip State::ExecAssignment and jump to PropagateAssignment, because the (now) latest
+                        // decision level already has the expected assignment set due to the call to backtrack
+                        println!("Continuing with dl {}", dec_levels.len() + 1);
+                        state = State::PropagateAssignment(new_assignment);
+                    }
+                }
+            }
+
+            State::NewDecLevelWithAssignment(new_assigned_lit) => {
+                println!(
+                    "Trying to assign new var {:?} = {:?}",
+                    new_assigned_lit.0, new_assigned_lit.1
+                );
+                let new_assignment = dec_levels
                     .last()
                     .map(|dl| &dl.assignment)
                     .unwrap_or(&initial_assignment)
-                    .get(var)
-                    .is_some();
+                    .with(new_assigned_lit.0, new_assigned_lit.1);
 
-                if assigned {
-                    var += 1;
-                } else {
-                    break var;
+                let new_dl = DecisionLevel {
+                    assignment: new_assignment,
+                    changed_var: new_assigned_lit.0,
+                    flipped: false,
+                };
+                dec_levels.push(new_dl);
+                state = State::PropagateAssignment(new_assigned_lit);
+            }
+
+            State::PropagateAssignment(new_assigned_lit) => {
+                print!("Propagating assignment {:?}: ", new_assigned_lit);
+                // The current/top decision level already has the assignment set
+                // but it needs to be propagated
+                debug_assert!(matches!(
+                    dec_levels
+                        .last()
+                        .unwrap()
+                        .assignment
+                        .get_lit(new_assigned_lit),
+                    Some(true)
+                ));
+
+                let assignment = &mut dec_levels
+                    .last_mut()
+                    .expect("Encountered State::PropagateAssignment without decision level")
+                    .assignment;
+
+                let result =
+                    propagate_assignment(new_assigned_lit, assignment, &cnf, &mut watchedliterals);
+
+                match result {
+                    ExecuteAssignmentResult::Unsatisfiable => {
+                        // Assignment caused insatisfiability => backtrack
+                        println!("Unsatisfiable.");
+                        state = State::Backtrack
+                    }
+                    ExecuteAssignmentResult::AssignmentDone => {
+                        println!("Done.");
+                        state = State::CheckCurrentLevel;
+                    }
                 }
             }
-        };
-
-        // Check if the assignment is complete, i.e. no variable to be set could be found
-        if var > max {
-            // Assignment complete, therefore backtrack
-            let bt_result = backtrack(&mut dec_levels);
-            match bt_result {
-                BacktrackResult::UnsatisfiableFormula => return (false, stats),
-                BacktrackResult::ContinueLevel => continue,
-            }
         }
-
-        // Assignment incomplete, we found a new variable to set
-        let new_assignment = dec_levels
-            .last()
-            .map(|dl| &dl.assignment)
-            .unwrap_or(&initial_assignment)
-            .with(var, FIRST_TRY);
-
-        // Propagate vars
-        let new_assignment = calc_bool_prop(&cnf, &new_assignment).unwrap_or(new_assignment);
-        let new_dl = DecisionLevel {
-            assignment: new_assignment,
-            changed_var: var,
-            flipped: false,
-        };
-        dec_levels.push(new_dl);
     }
 }
 
@@ -114,47 +190,121 @@ fn check_assignment(cnf: &Cnf, a: &Assignment, stats: &mut Stats) -> bool {
     return cnf.is_satisfied(&a);
 }
 
-/// Calculates the initial assignment from the watched literal's unit clauses
-///
-/// @return None, if the formula is unsatisfiable
-fn calc_initial_assignment(watchedliterals: &WatchedLiterals) -> Option<Assignment> {
-    let mut assignment = Assignment::new();
+fn choose_next_var(
+    max: Var,
+    dec_levels: &[DecisionLevel],
+    initial_assignment: &Assignment,
+) -> Option<Var> {
+    // start with 1 + highest from last dl or 0s
+    let mut var = 1 + dec_levels
+        .last()
+        .and_then(|dl| dl.assignment.highest_assigned_var())
+        .unwrap_or(0);
 
-    for (_cls, lit) in watchedliterals.unit_clauses() {
-        match assignment.get(lit.0) {
-            Some(val) => {
-                if val == lit.1 {
-                    // Assignment already done
-                    continue;
-                } else {
-                    // Wrong assignment and this is decision level zero
-                    return None;
+    // increase picked var while it is already set (due to bcp)
+    let var = loop {
+        let assigned = dec_levels
+            .last()
+            .map(|dl| &dl.assignment)
+            .unwrap_or(&initial_assignment)
+            .get(var)
+            .is_some();
+
+        if assigned {
+            var += 1;
+        } else {
+            break var;
+        }
+    };
+
+    if var < max {
+        Some(var)
+    } else {
+        None
+    }
+}
+
+/// Propagates a decision (new_literal) in the given assignment using the watched literals
+///
+/// The assignment must already contain the new_literal and resulting propagations will mutate it
+/// The watched literals are used for propagations and are updated accordingly
+///
+/// Returns AssignmentDone if the new_literal and all propagations are now reflected in the assignment
+/// and watched literals without encountering a conflict
+/// Returns Unsatisfiable if the new_literal or resulting propagations caused a conflict. In this case
+/// the current decision level should be dropped
+fn propagate_assignment(
+    new_literal: LiteralTpl,
+    assignment: &mut Assignment,
+    cnf: &Cnf,
+    watchedliterals: &mut WatchedLiterals,
+) -> ExecuteAssignmentResult {
+    debug_assert!(matches!(assignment.get_lit(new_literal), Some(true)));
+
+    // Vars to propagate
+    let mut propagations = VecDeque::new();
+    propagations.push_back(new_literal);
+
+    while let Some(prop) = propagations.pop_front() {
+        let result = watchedliterals.update(&cnf, assignment, prop);
+        match result {
+            UpdateResult::Unsatisfiable => {
+                // Unsatisfiable
+                return ExecuteAssignmentResult::Unsatisfiable;
+            }
+
+            UpdateResult::Satisfiable {
+                propagations: new_propagations,
+            } => {
+                // Assignment of propagation successful, store all new propagations
+                for (prop_var, prop_val) in new_propagations {
+                    propagations.push_back((prop_var, prop_val));
+                    assignment.change(prop_var, prop_val);
                 }
             }
-            None => {
-                assignment.change(lit.0, lit.1);
+        }
+    }
+
+    // All propagations handled without running into unsatisfiability
+    ExecuteAssignmentResult::AssignmentDone
+}
+
+#[must_use]
+enum ExecuteAssignmentResult {
+    Unsatisfiable,
+    AssignmentDone,
+}
+
+/// Calculates an assignment satisfying all clauses with only a single literal
+///
+/// @return None, if there are two conflicting clauses with a single literal
+fn get_assignment_from_single_clauses(cnf: &Cnf) -> Option<Assignment> {
+    let mut assignment = Assignment::new();
+
+    for clause in &cnf.clauses {
+        let mut literals = clause.literals();
+        match (literals.next(), literals.next()) {
+            (Some(lit), None) => {
+                // Clause only contains one literal
+                match assignment.get_lit(lit) {
+                    Some(true) => {
+                        // Already satisfying
+                    }
+                    Some(false) => {
+                        // Clause unsat
+                        return None;
+                    }
+                    None => {
+                        assignment.change(lit.0, lit.1);
+                    }
+                }
             }
+
+            _ => {}
         }
     }
 
     Some(assignment)
-}
-
-///
-            }
-
-        }
-    }
-}
-
-                    }
-                        return None;
-                    }
-                }
-            }
-        }
-    }
-
 }
 
 /// Backtracks the given decision levels,
@@ -167,8 +317,9 @@ fn backtrack(dec_levels: &mut Vec<DecisionLevel>) -> BacktrackResult {
                     // This dl has not been flipped yet, so try it out
                     dl.flipped = true;
                     let old_assignment = dl.assignment.get(dl.changed_var).unwrap();
-                    dl.assignment.change(dl.changed_var, !old_assignment);
-                    return BacktrackResult::ContinueLevel;
+                    let new_assignment = (dl.changed_var, !old_assignment);
+                    dl.assignment.change(new_assignment.0, new_assignment.1);
+                    return BacktrackResult::ContinueWith(new_assignment);
                 } else {
                     // This dl has already been flipped, backtrack further
                     dec_levels.pop();
@@ -186,7 +337,7 @@ fn backtrack(dec_levels: &mut Vec<DecisionLevel>) -> BacktrackResult {
 #[derive(Debug, PartialEq, Eq)]
 enum BacktrackResult {
     UnsatisfiableFormula,
-    ContinueLevel,
+    ContinueWith(LiteralTpl),
 }
 
 #[cfg(test)]
@@ -290,7 +441,7 @@ mod tests {
 
         assert!(matches!(
             backtrack(&mut dls),
-            BacktrackResult::ContinueLevel
+            BacktrackResult::ContinueWith((100, false))
         ));
         assert_eq!(
             dls,
@@ -326,7 +477,7 @@ mod tests {
 
         assert!(matches!(
             backtrack(&mut dls),
-            BacktrackResult::ContinueLevel
+            BacktrackResult::ContinueWith((50, true))
         ));
         assert_eq!(
             dls,
