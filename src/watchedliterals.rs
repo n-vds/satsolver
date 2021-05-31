@@ -222,6 +222,10 @@ impl WatchedLiterals {
     }
 
     /// Finds a new literal suitable to be watched in a given clause, acknowledging the second watched literal
+    ///
+    /// # Arguments
+    /// 
+    /// * `second_wl` - the other literal that is already watched
     fn find_replacement_literal(
         cls: &Clause,
         assignment: &Assignment,
@@ -315,11 +319,17 @@ impl Debug for WatchedLiterals {
 
 #[derive(Debug, PartialEq, Eq)]
 enum FindOtherSuitableLiteral {
+    /// The given (second) watched literal is already satisfying, so no second watched literal is needed
     GivenLiteralSatisfying,
+    /// Another literal (not the given one) was found which satisfies the clause
     OtherLiteralSatisfying(LiteralTpl),
+    /// The given literal and (at least) another one are unassigned
     MultipleUnassigned(LiteralTpl),
+    /// All literals are false except the given one (second watched literal) which is unassigned, so this clause becomes unit
     UnitClauseWithGiven,
+    /// All literals are false except this one which is unassigned, so this clause becomes unit
     UnitClause(LiteralTpl),
+    /// All literals are false so this clause has become unsatisfiable
     UnsatisfiableClause,
 }
 
