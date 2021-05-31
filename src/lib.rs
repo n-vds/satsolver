@@ -1,8 +1,5 @@
-mod assignment;
-mod cnf;
+pub mod assignment;
+pub mod cnf;
 mod input;
-mod satsolve;
+pub mod satsolve;
 mod watchedliterals;
-
-pub use crate::cnf::{Clause, Cnf, LiteralTpl};
-pub use crate::satsolve::*;
