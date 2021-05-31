@@ -262,13 +262,11 @@ impl WatchedLiterals {
                         Some(stored_lit) => {
                             // Multiple unassigned literals found
                             // Return the one that is not second_wl
-                            return if stored_lit == second_wl {
-                                FindOtherSuitableLiteral::MultipleUnassigned(lit)
-                            } else if lit == second_wl {
+                            return if lit == second_wl {
+                                assert!(stored_lit != second_wl);
                                 FindOtherSuitableLiteral::MultipleUnassigned(stored_lit)
                             } else {
-                                // second_wl cannot be stored_lit and lit at the same time
-                                unreachable!()
+                                FindOtherSuitableLiteral::MultipleUnassigned(lit)
                             };
                         }
                         None => {
