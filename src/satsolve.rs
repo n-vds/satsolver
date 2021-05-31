@@ -9,6 +9,7 @@ use crate::{
 struct DecisionLevel {
     assignment: Assignment,
     changed_var: Var,
+    next_var_at_least: Var,
     flipped: bool,
 }
 
@@ -137,9 +138,22 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
                     .unwrap_or(&initial_assignment)
                     .with(new_assigned_lit.0, new_assigned_lit.1);
 
+                let next_var_at_least = {
+                    let nval = dec_levels
+                        .last()
+                        .map(|dl| dl.next_var_at_least)
+                        .unwrap_or(0);
+                    if new_assigned_lit.0 == nval + 1 {
+                        new_assigned_lit.0
+                    } else {
+                        nval
+                    }
+                };
+
                 let new_dl = DecisionLevel {
                     assignment: new_assignment,
                     changed_var: new_assigned_lit.0,
+                    next_var_at_least,
                     flipped: false,
                 };
                 dec_levels.push(new_dl);
@@ -185,9 +199,10 @@ pub fn is_satisfiable(cnf: &Cnf) -> (bool, Stats) {
 
 #[inline(always)]
 fn check_assignment(cnf: &Cnf, a: &Assignment, stats: &mut Stats) -> bool {
-    println!("...Checking {:?}", a);
+    let result = cnf.is_satisfied(&a);
+    println!("...Checking {:?}: {}", a, result);
     stats.tries += 1;
-    return cnf.is_satisfied(&a);
+    result
 }
 
 fn choose_next_var(
@@ -198,17 +213,17 @@ fn choose_next_var(
     // start with 1 + highest from last dl or 0s
     let mut var = 1 + dec_levels
         .last()
-        .and_then(|dl| dl.assignment.highest_assigned_var())
+        .map(|dl| dl.next_var_at_least)
         .unwrap_or(0);
+
+    let a = dec_levels
+        .last()
+        .map(|dl| &dl.assignment)
+        .unwrap_or(&initial_assignment);
 
     // increase picked var while it is already set (due to bcp)
     let var = loop {
-        let assigned = dec_levels
-            .last()
-            .map(|dl| &dl.assignment)
-            .unwrap_or(&initial_assignment)
-            .get(var)
-            .is_some();
+        let assigned = a.get(var).is_some();
 
         if assigned {
             var += 1;
@@ -388,6 +403,7 @@ mod tests {
         let mut dls = vec![DecisionLevel {
             assignment: Assignment::new_with(100, true),
             changed_var: 100,
+            next_var_at_least: 0,
             flipped: true,
         }];
 
@@ -404,21 +420,25 @@ mod tests {
             DecisionLevel {
                 assignment: Assignment::new_with(100, true),
                 changed_var: 100,
+                next_var_at_least: 0,
                 flipped: true,
             },
             DecisionLevel {
                 assignment: Assignment::new_with(10, true),
                 changed_var: 10,
+                next_var_at_least: 0,
                 flipped: true,
             },
             DecisionLevel {
                 assignment: Assignment::new_with(50, true),
                 changed_var: 50,
+                next_var_at_least: 0,
                 flipped: true,
             },
             DecisionLevel {
                 assignment: Assignment::new_with(120, true),
                 changed_var: 120,
+                next_var_at_least: 0,
                 flipped: true,
             },
         ];
@@ -436,6 +456,7 @@ mod tests {
         let mut dls = vec![DecisionLevel {
             assignment: Assignment::new_with(100, true),
             changed_var: 100,
+            next_var_at_least: 0,
             flipped: false,
         }];
 
@@ -448,6 +469,7 @@ mod tests {
             vec![DecisionLevel {
                 assignment: Assignment::new_with(100, false),
                 changed_var: 100,
+                next_var_at_least: 0,
                 flipped: true,
             }]
         );
@@ -459,11 +481,13 @@ mod tests {
             DecisionLevel {
                 assignment: Assignment::new_with(100, true),
                 changed_var: 100,
+                next_var_at_least: 0,
                 flipped: false,
             },
             DecisionLevel {
                 assignment: Assignment::new_with(100, true).with(50, false),
                 changed_var: 50,
+                next_var_at_least: 0,
                 flipped: false,
             },
             DecisionLevel {
@@ -471,6 +495,7 @@ mod tests {
                     .with(50, false)
                     .with(120, true),
                 changed_var: 120,
+                next_var_at_least: 0,
                 flipped: true,
             },
         ];
@@ -485,11 +510,13 @@ mod tests {
                 DecisionLevel {
                     assignment: Assignment::new_with(100, true),
                     changed_var: 100,
+                    next_var_at_least: 0,
                     flipped: false,
                 },
                 DecisionLevel {
                     assignment: Assignment::new_with(100, true).with(50, true), // this true now
                     changed_var: 50,
+                    next_var_at_least: 0,
                     flipped: true, // this now flipped
                 },
                 /* popped off:
