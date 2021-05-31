@@ -4,8 +4,12 @@ use crate::assignment::Assignment;
 
 pub type Var = u32;
 
+/// A literal is a positive or negated form of a variable
 pub type LiteralTpl = (Var, bool);
 
+/// A collection of [clauses] in logical conjunction
+/// 
+/// [clauses]: Clause
 #[derive(PartialEq)]
 pub struct Cnf {
     pub clauses: Vec<Clause>,
@@ -57,6 +61,9 @@ impl Debug for Cnf {
     }
 }
 
+/// A collection of literals (positive or negative [variables]) in logical disjunction
+/// 
+/// [variables]: Var
 pub struct Clause {
     positive: Vec<Var>,
     negative: Vec<Var>,
@@ -78,6 +85,7 @@ impl Clause {
         self.negative.iter().copied()
     }
 
+    /// Returns an iterator over all literals in this clause
     pub fn literals(&self) -> impl Iterator<Item = LiteralTpl> + '_ {
         self.positive
             .iter()
@@ -85,6 +93,11 @@ impl Clause {
             .chain(self.negative.iter().map(|&it| (it, false)))
     }
 
+    /// Adds a positive literal to this clause if it is not already present
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the negated literal is already part of this clause
     pub fn add_positive(&mut self, var: Var) {
         if !self.positive.contains(&var) {
             if !self.negative.contains(&var) {
@@ -95,6 +108,11 @@ impl Clause {
         }
     }
 
+    /// Adds a negative literal to this clause if it is not already present
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the negated literal is already part of this clause
     pub fn add_negative(&mut self, var: Var) {
         if !self.negative.contains(&var) {
             if !self.positive.contains(&var) {
@@ -105,16 +123,24 @@ impl Clause {
         }
     }
 
-    pub fn get(&self, var: Var) -> LiteralInfo {
+    /// Returns wether the given variable is part of this clause in positive or negative form
+    /// 
+    /// If the positive literal of the given variable is part of this clause,
+    /// returns `Some(true)`, if the negative literal is part of this clause
+    /// `Some(false)`.
+    /// If neither the positive nor negative literal are part of this clause 
+    /// returns `None`.
+    pub fn get(&self, var: Var) -> Option<bool> {
         if self.positive.contains(&var) {
-            LiteralInfo::POSITIVE
+            Some(true)
         } else if self.negative.contains(&var) {
-            LiteralInfo::NEGATIVE
+            Some(false)
         } else {
-            LiteralInfo::NoOcc
+            None
         }
     }
 
+    /// Checks wether the given assignment satisfies this clause
     pub fn is_satisfied(&self, assignment: &Assignment) -> bool {
         self.positive
             .iter()
@@ -161,9 +187,9 @@ impl Debug for Clause {
         let str = all_vars
             .iter()
             .map(|&var| match self.get(var) {
-                LiteralInfo::POSITIVE => format!("{:+03}", var),
-                LiteralInfo::NEGATIVE => format!("-{:02}", var),
-                LiteralInfo::NoOcc => unreachable!(),
+                Some(true) => format!("{:+03}", var),
+                Some(false) => format!("-{:02}", var),
+                None => unreachable!(),
             })
             .collect::<Vec<String>>()
             .join(" ∨ ");

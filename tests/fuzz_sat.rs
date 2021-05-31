@@ -4,7 +4,7 @@ use satsolver::cnf::{Clause, Cnf};
 use satsolver::satsolve;
 
 #[test]
-#[ignore]
+//#[ignore]
 fn fuzzy_test_randomly() {
     for _ in 0..10 {
         test_fuzzy_instance();

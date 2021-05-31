@@ -5,6 +5,8 @@ use crate::{
     cnf::{Cnf, LiteralTpl, Var},
     watchedliterals::{UpdateResult, WatchedLiterals},
 };
+
+
 #[derive(Debug, PartialEq)]
 struct DecisionLevel {
     assignment: Assignment,
@@ -13,6 +15,7 @@ struct DecisionLevel {
     flipped: bool,
 }
 
+/// Statistics about the solving process
 pub struct Stats {
     pub tries: usize,
 }
